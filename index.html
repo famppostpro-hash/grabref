@@ -1,0 +1,1305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<title>GRAB REF</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.2/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #0e0e10; --bg-card: #18181b; --bg-hover: #222225; --bg-surface: #131315;
+  --border: #2a2a2e; --border-active: #4a4a50;
+  --text: #e4e4e7; --text-dim: #8b8b8f; --text-muted: #5a5a5e;
+  --accent: #e8a838; --accent-dim: rgba(232,168,56,0.15); --accent-text: #0e0e10;
+  --danger: #ef4444; --danger-dim: rgba(239,68,68,0.12);
+  --success: #22c55e; --tag-bg: #1e1e22;
+  --font: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  --radius: 6px; --radius-lg: 10px;
+}
+body { font-family: var(--font); background: var(--bg); color: var(--text); overflow: hidden; height: 100dvh; width: 100vw; }
+#root { height: 100%; width: 100%; }
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+input, textarea, select, button { font-family: inherit; }
+input::placeholder, textarea::placeholder { color: var(--text-muted); }
+@keyframes fadeIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+@keyframes slideUp { from { opacity:0; transform:translateY(20px); } to { opacity:1; transform:none; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+.animate-in { animation: fadeIn 0.2s ease-out; }
+.animate-slide-up { animation: slideUp 0.3s ease-out; }
+.spinner { width:16px; height:16px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 0.7s linear infinite; display:inline-block; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback, useMemo, createContext, useContext } = React;
+
+// ─── Supabase ────────────────────────────────────────────────
+const SUPABASE_URL = 'https://krvtuvxnsqcqehvutgiw.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtydnR1dnhuc3FjcWVodnV0Z2l3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDM2NjA1NjUsImV4cCI6MjA1OTIzNjU2NX0.9p0JrJ0ppMKKSBXXWfONjKq4R5KK7Ky5LRBhgCuVb7o';
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const BUCKET = 'ref-images';
+
+// ─── Supabase helpers ────────────────────────────────────────
+async function sbGetAll(table) {
+  const { data, error } = await supabase.from(table).select('*').order('created_at', { ascending: false });
+  if (error) throw error;
+  return data || [];
+}
+async function sbUpsert(table, item) {
+  const { error } = await supabase.from(table).upsert(item);
+  if (error) throw error;
+}
+async function sbDelete(table, id) {
+  const { error } = await supabase.from(table).delete().eq('id', id);
+  if (error) throw error;
+}
+async function sbUploadImage(file, path) {
+  const { data, error } = await supabase.storage.from(BUCKET).upload(path, file, { upsert: true });
+  if (error) throw error;
+  const { data: urlData } = supabase.storage.from(BUCKET).getPublicUrl(path);
+  return urlData.publicUrl;
+}
+async function sbUploadBase64(base64, path) {
+  const res = await fetch(base64);
+  const blob = await res.blob();
+  return sbUploadImage(blob, path);
+}
+async function sbDeleteImage(path) {
+  await supabase.storage.from(BUCKET).remove([path]);
+}
+
+// ─── Image Processing Pipeline ──────────────────────────────
+const IMG_MAX_W = 1920;
+const IMG_MAX_H = 1080;
+const THUMB_MAX = 480;
+const WEBP_QUALITY_FULL = 0.88;
+const WEBP_QUALITY_THUMB = 0.72;
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+// Convert any image to WebP via canvas, respecting max dimensions & aspect ratio
+async function processImage(source, { maxW = IMG_MAX_W, maxH = IMG_MAX_H, quality = WEBP_QUALITY_FULL } = {}) {
+  let img;
+  if (source instanceof File || source instanceof Blob) {
+    const url = URL.createObjectURL(source);
+    try { img = await loadImage(url); } finally { URL.revokeObjectURL(url); }
+  } else if (typeof source === 'string') {
+    img = await loadImage(source);
+  } else {
+    img = source; // already an HTMLImageElement
+  }
+
+  let { naturalWidth: w, naturalHeight: h } = img;
+
+  // Scale down only if exceeds max — never scale up, never distort aspect ratio
+  if (w > maxW || h > maxH) {
+    const ratio = Math.min(maxW / w, maxH / h);
+    w = Math.round(w * ratio);
+    h = Math.round(h * ratio);
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, w, h);
+
+  return new Promise(resolve => {
+    canvas.toBlob(blob => {
+      resolve({ blob, width: w, height: h });
+    }, 'image/webp', quality);
+  });
+}
+
+// Generate both full-size and thumbnail WebP from a single source
+async function processImageDual(source) {
+  const full = await processImage(source, { maxW: IMG_MAX_W, maxH: IMG_MAX_H, quality: WEBP_QUALITY_FULL });
+  const thumb = await processImage(source, { maxW: THUMB_MAX, maxH: THUMB_MAX, quality: WEBP_QUALITY_THUMB });
+  return { full, thumb };
+}
+
+// Build a clean filename: grabref_{sanitized-title}_{timestamp}.webp
+function buildFilename(title) {
+  const safe = (title || 'untitled')
+    .toLowerCase()
+    .replace(/[^a-z0-9ก-๙\s_-]/g, '')  // keep Thai + alphanumeric
+    .replace(/\s+/g, '_')
+    .slice(0, 60);
+  const ts = Date.now().toString(36);
+  return `grabref_${safe}_${ts}.webp`;
+}
+
+// ─── Utils ───────────────────────────────────────────────────
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+
+function autoTag(item) {
+  const tags = [];
+  const text = `${item.title||''} ${item.note||''} ${item.source_url||''}`.toLowerCase();
+  const rules = [
+    [['youtube.com','youtu.be'],'youtube'], [['twitter.com','x.com'],'twitter'],
+    [['instagram.com'],'instagram'], [['pinterest.com'],'pinterest'],
+    [['dribbble.com'],'dribbble'], [['behance.net'],'behance'],
+    [['figma.com'],'figma'], [['github.com'],'github'],
+    [['medium.com'],'article'], [['reddit.com'],'reddit'],
+    [['tiktok.com'],'tiktok'],
+  ];
+  for (const [kws, tag] of rules) { if (kws.some(k => text.includes(k))) tags.push(tag); }
+  if (item.type==='image') tags.push('image');
+  if (item.type==='link') tags.push('link');
+  if (item.type==='text') tags.push('note');
+  if (text.match(/design|ui|ux|layout/)) tags.push('design');
+  if (text.match(/code|dev|api|react|python/)) tags.push('code');
+  if (text.match(/photo|photograph|camera/)) tags.push('photo');
+  if (text.match(/color|palette|gradient/)) tags.push('color');
+  if (text.match(/font|typo|typeface/)) tags.push('typography');
+  if (text.match(/brand|logo|identity/)) tags.push('branding');
+  if (text.match(/video|clip|reel/)) tags.push('video');
+  if (text.match(/music|song|audio/)) tags.push('audio');
+  if (text.match(/recipe|food|cook/)) tags.push('food');
+  if (text.match(/travel|trip|hotel/)) tags.push('travel');
+  return [...new Set(tags)];
+}
+
+// ─── Icons ───────────────────────────────────────────────────
+const I = {
+  plus: <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><line x1="8" y1="3" x2="8" y2="13"/><line x1="3" y1="8" x2="13" y2="8"/></svg>,
+  search: <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="7" cy="7" r="4.5"/><line x1="10.5" y1="10.5" x2="14" y2="14"/></svg>,
+  grid: <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="1.5" y="1.5" width="5" height="5" rx="1"/><rect x="9.5" y="1.5" width="5" height="5" rx="1"/><rect x="1.5" y="9.5" width="5" height="5" rx="1"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/></svg>,
+  list: <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><line x1="5" y1="4" x2="14" y2="4"/><line x1="5" y1="8" x2="14" y2="8"/><line x1="5" y1="12" x2="14" y2="12"/><circle cx="2" cy="4" r="1" fill="currentColor" stroke="none"/><circle cx="2" cy="8" r="1" fill="currentColor" stroke="none"/><circle cx="2" cy="12" r="1" fill="currentColor" stroke="none"/></svg>,
+  masonry: <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="1.5" y="1.5" width="5" height="7" rx="1"/><rect x="9.5" y="1.5" width="5" height="4" rx="1"/><rect x="1.5" y="11" width="5" height="3.5" rx="1"/><rect x="9.5" y="8" width="5" height="6.5" rx="1"/></svg>,
+  x: <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><line x1="3" y1="3" x2="11" y2="11"/><line x1="11" y1="3" x2="3" y2="11"/></svg>,
+  trash: <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M2 4h10M5 4V2.5a.5.5 0 01.5-.5h3a.5.5 0 01.5.5V4M11 4v7.5a1 1 0 01-1 1H4a1 1 0 01-1-1V4"/></svg>,
+  link: <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M6 7.5a3 3 0 004.2.3l1.5-1.5a3 3 0 00-4.2-4.2L6.3 3.3"/><path d="M8 6.5a3 3 0 00-4.2-.3L2.3 7.7a3 3 0 004.2 4.2L7.7 10.7"/></svg>,
+  image: <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><rect x="1.5" y="1.5" width="11" height="11" rx="1.5"/><circle cx="5" cy="5" r="1.2"/><path d="M12.5 9l-3-3L3 12.5"/></svg>,
+  paste: <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><rect x="4" y="4" width="9" height="10" rx="1.5"/><path d="M4 7H2.5A1.5 1.5 0 011 5.5v-3A1.5 1.5 0 012.5 1h6A1.5 1.5 0 0110 2.5V4"/></svg>,
+  folder: <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M1.5 3A1.5 1.5 0 013 1.5h2.4a1 1 0 01.8.4L7 3h4A1.5 1.5 0 0112.5 4.5v6A1.5 1.5 0 0111 12H3A1.5 1.5 0 011.5 10.5V3z"/></svg>,
+  tag: <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"><path d="M1 6.2V2a1 1 0 011-1h4.2a1 1 0 01.7.3l4.8 4.8a1 1 0 010 1.4l-4.2 4.2a1 1 0 01-1.4 0L1.3 6.9a1 1 0 01-.3-.7z"/><circle cx="4" cy="4" r=".8" fill="currentColor" stroke="none"/></svg>,
+  edit: <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M9.5 1.5l3 3L4 13H1v-3L9.5 1.5z"/></svg>,
+  ext: <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"><path d="M9 6.5v3a1 1 0 01-1 1H2.5a1 1 0 01-1-1V4a1 1 0 011-1H5.5"/><path d="M7 1.5h3.5V5"/><path d="M5.5 6.5L10.5 1.5"/></svg>,
+  inbox: <svg width="40" height="40" viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="5" width="30" height="30" rx="4"/><path d="M5 25h8l3 4h8l3-4h8"/></svg>,
+  cloud: <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M11 9.5a2.5 2.5 0 000-5 3.5 3.5 0 00-6.9-.5A2.5 2.5 0 003 9.5"/></svg>,
+  wifi: <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"><path d="M1 4a7 7 0 0110 0"/><path d="M3 6.5a4 4 0 016 0"/><path d="M5 9a2 2 0 012 0"/><circle cx="6" cy="11" r=".5" fill="currentColor" stroke="none"/></svg>,
+  wifiOff: <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"><line x1="1" y1="1" x2="11" y2="11"/><path d="M3.5 6.7A4 4 0 019 7"/><circle cx="6" cy="11" r=".5" fill="currentColor" stroke="none"/></svg>,
+  menu: <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><line x1="2" y1="5" x2="16" y2="5"/><line x1="2" y1="9" x2="16" y2="9"/><line x1="2" y1="13" x2="16" y2="13"/></svg>,
+  camera: <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M2 5.5A1.5 1.5 0 013.5 4h1.8l.7-1.5h4l.7 1.5h1.8A1.5 1.5 0 0114 5.5v6a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 11.5v-6z"/><circle cx="8" cy="8.2" r="2.5"/></svg>,
+  download: <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M7 2v7.5M3.5 7L7 10.5 10.5 7"/><path d="M2 11.5h10"/></svg>,
+};
+
+// ─── Context ─────────────────────────────────────────────────
+const AppCtx = createContext(null);
+
+// ─── Toast ───────────────────────────────────────────────────
+function Toast({ toasts }) {
+  return (
+    <div style={{ position:'fixed', bottom:16, right:16, zIndex:2000, display:'flex', flexDirection:'column', gap:6 }}>
+      {toasts.map(t => (
+        <div key={t.id} className="animate-in" style={{
+          padding:'8px 14px', borderRadius:'var(--radius)',
+          background: t.type==='error' ? '#3f1111' : t.type==='success' ? '#0f2e1a' : '#1e1e22',
+          border: `1px solid ${t.type==='error'?'#7f1d1d':t.type==='success'?'#14532d':'var(--border)'}`,
+          color: t.type==='error'?'#fca5a5':t.type==='success'?'#86efac':'var(--text)',
+          fontSize:12, maxWidth:280,
+        }}>
+          {t.msg}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function useToast() {
+  const [toasts, setToasts] = useState([]);
+  function toast(msg, type='info') {
+    const id = uid();
+    setToasts(p => [...p, { id, msg, type }]);
+    setTimeout(() => setToasts(p => p.filter(t => t.id !== id)), 3000);
+  }
+  return { toasts, toast };
+}
+
+// ─── Tag ─────────────────────────────────────────────────────
+function Tag({ label, active, onClick, removable, onRemove }) {
+  return (
+    <span onClick={onClick} style={{
+      display:'inline-flex', alignItems:'center', gap:4,
+      padding:'2px 8px', fontSize:11, fontWeight:500,
+      fontFamily:'var(--font-mono)', letterSpacing:'0.02em',
+      background: active ? 'var(--accent-dim)' : 'var(--tag-bg)',
+      color: active ? 'var(--accent)' : 'var(--text-dim)',
+      border:`1px solid ${active?'var(--accent)':'transparent'}`,
+      borderRadius:3, cursor: onClick?'pointer':'default',
+      userSelect:'none', transition:'all 0.15s',
+    }}>
+      {label}
+      {removable && <span onClick={e=>{e.stopPropagation();onRemove?.();}} style={{cursor:'pointer',opacity:0.6,marginLeft:2}}>×</span>}
+    </span>
+  );
+}
+
+// ─── Ref Card ────────────────────────────────────────────────
+function RefCard({ item, onSelect, onDelete, compact }) {
+  const [hovered, setHovered] = useState(false);
+  const imgSrc = item.thumbnail_url;
+
+  return (
+    <div
+      className="animate-in"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onClick={() => onSelect(item)}
+      style={{
+        background: hovered ? 'var(--bg-hover)' : 'var(--bg-card)',
+        border:'1px solid var(--border)',
+        borderRadius:'var(--radius)', overflow:'hidden', cursor:'pointer',
+        transition:'all 0.15s', position:'relative',
+        breakInside:'avoid', marginBottom: compact ? 8 : 12,
+      }}
+    >
+      {imgSrc && (
+        <div style={{ position:'relative', width:'100%', background:'#111' }}>
+          <img src={imgSrc} alt="" style={{
+            width:'100%', display:'block',
+            maxHeight: compact ? 150 : 280, objectFit:'cover',
+          }} loading="lazy" />
+          {item.source_url && (
+            <a href={item.source_url} target="_blank" rel="noopener"
+              onClick={e=>e.stopPropagation()}
+              style={{
+                position:'absolute', top:6, right:6,
+                background:'rgba(0,0,0,0.7)', borderRadius:3,
+                padding:'2px 6px', display:'flex', alignItems:'center', gap:3,
+                color:'#aaa', fontSize:10, textDecoration:'none', backdropFilter:'blur(4px)',
+              }}
+            >{I.ext} {new URL(item.source_url).hostname.replace('www.','').slice(0,18)}</a>
+          )}
+        </div>
+      )}
+      <div style={{ padding: compact ? '8px 10px' : '10px 14px' }}>
+        {item.title && (
+          <div style={{
+            fontSize: compact?12:13, fontWeight:600, lineHeight:1.35, marginBottom:4,
+            overflow:'hidden', textOverflow:'ellipsis',
+            display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical',
+          }}>{item.title}</div>
+        )}
+        {item.note && !compact && (
+          <div style={{
+            fontSize:12, color:'var(--text-dim)', lineHeight:1.4, marginBottom:6,
+            overflow:'hidden', textOverflow:'ellipsis',
+            display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical',
+          }}>{item.note}</div>
+        )}
+        {item.tags?.length > 0 && (
+          <div style={{ display:'flex', flexWrap:'wrap', gap:3, marginTop:4 }}>
+            {item.tags.slice(0, compact?2:4).map(t => <Tag key={t} label={t} />)}
+            {item.tags.length > (compact?2:4) && (
+              <span style={{ fontSize:10, color:'var(--text-muted)' }}>+{item.tags.length-(compact?2:4)}</span>
+            )}
+          </div>
+        )}
+      </div>
+      {hovered && (
+        <div style={{
+          position:'absolute', top: imgSrc?'auto':6, bottom: imgSrc?6:'auto', right:6,
+          display:'flex', gap:4,
+        }}>
+          <button onClick={e=>{e.stopPropagation();onDelete(item.id);}} style={{
+            background:'rgba(0,0,0,0.8)', border:'none', borderRadius:3,
+            padding:'4px 6px', color:'var(--danger)', cursor:'pointer', backdropFilter:'blur(4px)',
+          }}>{I.trash}</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Detail Modal ────────────────────────────────────────────
+function DetailModal({ item, onClose, onUpdate, onDelete }) {
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(item.title||'');
+  const [note, setNote] = useState(item.note||'');
+  const [tagInput, setTagInput] = useState('');
+  const [tags, setTags] = useState(item.tags||[]);
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    setSaving(true);
+    await onUpdate({ ...item, title, note, tags });
+    setSaving(false);
+    setEditing(false);
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position:'fixed', inset:0, zIndex:1000,
+      background:'rgba(0,0,0,0.75)', backdropFilter:'blur(8px)',
+      display:'flex', alignItems:'center', justifyContent:'center', padding:20,
+    }}>
+      <div className="animate-slide-up" onClick={e=>e.stopPropagation()} style={{
+        background:'var(--bg-card)', border:'1px solid var(--border)',
+        borderRadius:'var(--radius-lg)', maxWidth:640, width:'100%',
+        maxHeight:'85vh', overflow:'auto',
+      }}>
+        {(item.full_url || item.thumbnail_url) && (
+          <div style={{ borderBottom:'1px solid var(--border)' }}>
+            <img src={item.full_url || item.thumbnail_url} alt="" style={{
+              width:'100%', maxHeight:400, objectFit:'contain', display:'block', background:'#111',
+            }} />
+          </div>
+        )}
+        <div style={{ padding:20 }}>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:16 }}>
+            {editing ? (
+              <input value={title} onChange={e=>setTitle(e.target.value)} placeholder="Title"
+                style={{
+                  flex:1, background:'var(--bg)', border:'1px solid var(--border)',
+                  borderRadius:'var(--radius)', padding:'6px 10px',
+                  fontSize:16, fontWeight:600, color:'var(--text)', outline:'none',
+                }}
+              />
+            ) : (
+              <h2 style={{ fontSize:18, fontWeight:700, flex:1 }}>{item.title||'Untitled'}</h2>
+            )}
+            <div style={{ display:'flex', gap:6, marginLeft:12 }}>
+              <button onClick={() => editing ? save() : setEditing(true)} style={{
+                background:'var(--bg)', border:'1px solid var(--border)',
+                borderRadius:'var(--radius)', padding:'5px 10px',
+                color:'var(--text)', cursor:'pointer', fontSize:12,
+                display:'flex', alignItems:'center', gap:4,
+              }}>
+                {saving ? <span className="spinner" /> : editing ? 'Save' : <>{I.edit} Edit</>}
+              </button>
+              <button onClick={onClose} style={{
+                background:'var(--bg)', border:'1px solid var(--border)',
+                borderRadius:'var(--radius)', padding:'5px 8px',
+                color:'var(--text-dim)', cursor:'pointer',
+              }}>{I.x}</button>
+            </div>
+          </div>
+
+          {item.source_url && (
+            <a href={item.source_url} target="_blank" rel="noopener" style={{
+              display:'inline-flex', alignItems:'center', gap:5,
+              color:'var(--accent)', fontSize:12, textDecoration:'none', marginBottom:12,
+            }}>
+              {I.ext}
+              {item.source_url.length>60 ? item.source_url.slice(0,60)+'...' : item.source_url}
+            </a>
+          )}
+
+          {editing ? (
+            <textarea value={note} onChange={e=>setNote(e.target.value)} placeholder="Add a note..." rows={3}
+              style={{
+                width:'100%', background:'var(--bg)', border:'1px solid var(--border)',
+                borderRadius:'var(--radius)', padding:'8px 10px',
+                fontSize:13, color:'var(--text)', outline:'none', resize:'vertical', marginBottom:12,
+              }}
+            />
+          ) : item.note ? (
+            <p style={{ fontSize:13, color:'var(--text-dim)', lineHeight:1.5, marginBottom:12 }}>{item.note}</p>
+          ) : null}
+
+          <div style={{ marginBottom:12 }}>
+            <div style={{ fontSize:11, color:'var(--text-muted)', marginBottom:6, fontWeight:600, textTransform:'uppercase', letterSpacing:'0.06em' }}>Tags</div>
+            <div style={{ display:'flex', flexWrap:'wrap', gap:4, marginBottom: editing?8:0 }}>
+              {tags.map(t => <Tag key={t} label={t} removable={editing} onRemove={()=>setTags(tags.filter(x=>x!==t))} />)}
+              {tags.length===0 && <span style={{ fontSize:12, color:'var(--text-muted)' }}>No tags</span>}
+            </div>
+            {editing && (
+              <input value={tagInput} onChange={e=>setTagInput(e.target.value)}
+                onKeyDown={e=>{
+                  if ((e.key==='Enter'||e.key===',') && tagInput.trim()) {
+                    e.preventDefault();
+                    const t = tagInput.trim().toLowerCase().replace(/,/g,'');
+                    if (t && !tags.includes(t)) setTags([...tags, t]);
+                    setTagInput('');
+                  }
+                }}
+                placeholder="Add tag and press Enter"
+                style={{
+                  background:'var(--bg)', border:'1px solid var(--border)',
+                  borderRadius:'var(--radius)', padding:'5px 8px',
+                  fontSize:12, color:'var(--text)', outline:'none', width:180,
+                }}
+              />
+            )}
+          </div>
+
+          <div style={{ fontSize:11, color:'var(--text-muted)', display:'flex', gap:16 }}>
+            <span>Added {new Date(item.created_at).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}</span>
+            <span style={{ textTransform:'capitalize' }}>{item.type}</span>
+            <span style={{ display:'flex', alignItems:'center', gap:3 }}>{I.cloud} Synced</span>
+          </div>
+
+          <div style={{ display:'flex', gap:8, marginTop:16, paddingTop:16, borderTop:'1px solid var(--border)' }}>
+            {(item.full_url || (item.thumbnail_url && item.storage_path)) && (
+              <button onClick={async ()=>{
+                try {
+                  const url = item.full_url || item.thumbnail_url;
+                  const res = await fetch(url);
+                  const blob = await res.blob();
+                  const fname = buildFilename(item.title || 'reference');
+                  const a = document.createElement('a');
+                  a.href = URL.createObjectURL(blob);
+                  a.download = fname;
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(a.href);
+                } catch(e) { console.error(e); }
+              }} style={{
+                background:'var(--accent-dim)', border:'1px solid transparent',
+                borderRadius:'var(--radius)', padding:'6px 12px',
+                color:'var(--accent)', cursor:'pointer', fontSize:12,
+                display:'flex', alignItems:'center', gap:4,
+              }}>{I.download} Save Image</button>
+            )}
+            <button onClick={()=>{onDelete(item.id);onClose();}} style={{
+              background:'var(--danger-dim)', border:'1px solid transparent',
+              borderRadius:'var(--radius)', padding:'6px 12px',
+              color:'var(--danger)', cursor:'pointer', fontSize:12,
+              display:'flex', alignItems:'center', gap:4,
+            }}>{I.trash} Delete</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Add Modal ───────────────────────────────────────────────
+function AddModal({ onClose, onAdd, collections }) {
+  const [mode, setMode] = useState('link');
+  const [url, setUrl] = useState('');
+  const [title, setTitle] = useState('');
+  const [note, setNote] = useState('');
+  const [imageData, setImageData] = useState(null);
+  const [imageFile, setImageFile] = useState(null);
+  const [collection, setCollection] = useState('');
+  const [saving, setSaving] = useState(false);
+  const fileRef = useRef(null);
+
+  function handleFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImageFile(file);
+    const reader = new FileReader();
+    reader.onload = ev => {
+      setImageData(ev.target.result);
+      if (!title) setTitle(file.name.replace(/\.[^.]+$/, ''));
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function handlePaste(e) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        setImageFile(file);
+        const reader = new FileReader();
+        reader.onload = ev => {
+          setImageData(ev.target.result);
+          setMode('image');
+          if (!title) setTitle('Pasted image');
+        };
+        reader.readAsDataURL(file);
+        return;
+      }
+      if (item.type==='text/plain') {
+        item.getAsString(text => {
+          if (text.match(/^https?:\/\//)) { setUrl(text.trim()); setMode('link'); }
+          else { setNote(text); setMode('text'); }
+        });
+      }
+    }
+  }
+
+  async function submit() {
+    setSaving(true);
+    try {
+      let thumbnailUrl = null;
+      let fullUrl = null;
+      let storagePath = null;
+      let thumbPath = null;
+
+      if (imageData || imageFile) {
+        const source = imageFile || imageData;
+        const { full, thumb } = await processImageDual(source);
+        const baseName = buildFilename(title || 'upload');
+        const fullPath = `full/${baseName}`;
+        const tPath = `thumb/${baseName}`;
+
+        fullUrl = await sbUploadImage(full.blob, fullPath);
+        thumbnailUrl = await sbUploadImage(thumb.blob, tPath);
+        storagePath = fullPath;
+        thumbPath = tPath;
+      } else if (mode==='link' && url) {
+        thumbnailUrl = `https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=${encodeURIComponent(url)}&size=128`;
+      }
+
+      const ref = {
+        id: uid(),
+        type: mode,
+        title: title || (mode==='link' ? url.replace(/^https?:\/\/(www\.)?/,'').split('/')[0] : mode==='text' ? note.slice(0,50) : 'Untitled'),
+        note: note || null,
+        source_url: mode==='link' ? url : null,
+        thumbnail_url: thumbnailUrl,
+        full_url: fullUrl || null,
+        storage_path: storagePath,
+        thumb_path: thumbPath || null,
+        collection_id: collection || null,
+        tags: [],
+        created_at: Date.now(),
+      };
+      ref.tags = autoTag(ref);
+      await onAdd(ref);
+      onClose();
+    } catch(err) {
+      console.error(err);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position:'fixed', inset:0, zIndex:1000,
+      background:'rgba(0,0,0,0.75)', backdropFilter:'blur(8px)',
+      display:'flex', alignItems:'center', justifyContent:'center', padding:20,
+    }}>
+      <div className="animate-slide-up" onClick={e=>e.stopPropagation()} onPaste={handlePaste}
+        style={{
+          background:'var(--bg-card)', border:'1px solid var(--border)',
+          borderRadius:'var(--radius-lg)', width:'100%', maxWidth:480, overflow:'hidden',
+        }}
+      >
+        <div style={{
+          padding:'14px 16px', borderBottom:'1px solid var(--border)',
+          display:'flex', justifyContent:'space-between', alignItems:'center',
+        }}>
+          <span style={{ fontWeight:600, fontSize:14 }}>Add Reference</span>
+          <button onClick={onClose} style={{ background:'none', border:'none', color:'var(--text-dim)', cursor:'pointer' }}>{I.x}</button>
+        </div>
+
+        <div style={{ display:'flex', borderBottom:'1px solid var(--border)' }}>
+          {[['link',I.link,'Link'],['image',I.image,'Image'],['text',I.paste,'Note']].map(([m,icon,label]) => (
+            <button key={m} onClick={()=>setMode(m)} style={{
+              flex:1, padding:'10px 0', background:'none', border:'none',
+              borderBottom: mode===m ? '2px solid var(--accent)' : '2px solid transparent',
+              color: mode===m ? 'var(--accent)' : 'var(--text-dim)',
+              cursor:'pointer', fontSize:12, fontWeight:500,
+              display:'flex', alignItems:'center', justifyContent:'center', gap:5,
+            }}>{icon}{label}</button>
+          ))}
+        </div>
+
+        <div style={{ padding:16, display:'flex', flexDirection:'column', gap:10 }}>
+          <div style={{
+            border:'1px dashed var(--border)', borderRadius:'var(--radius)',
+            padding:'10px 14px', textAlign:'center', fontSize:11, color:'var(--text-muted)',
+          }}>
+            {I.paste} Paste here — image, URL, or text
+          </div>
+
+          {mode==='link' && (
+            <input value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://..." autoFocus
+              style={{
+                background:'var(--bg)', border:'1px solid var(--border)',
+                borderRadius:'var(--radius)', padding:'8px 12px',
+                fontSize:13, color:'var(--text)', outline:'none',
+              }}
+            />
+          )}
+
+          {mode==='image' && (
+            <div>
+              {imageData ? (
+                <div style={{ position:'relative', marginBottom:8 }}>
+                  <img src={imageData} alt="" style={{ width:'100%', maxHeight:200, objectFit:'contain', borderRadius:'var(--radius)', background:'#111' }} />
+                  <button onClick={()=>{setImageData(null);setImageFile(null);}} style={{
+                    position:'absolute', top:6, right:6, background:'rgba(0,0,0,0.7)',
+                    border:'none', borderRadius:3, padding:'3px 5px', color:'#fff', cursor:'pointer',
+                  }}>{I.x}</button>
+                </div>
+              ) : (
+                <button onClick={()=>fileRef.current?.click()} style={{
+                  width:'100%', padding:'24px 0', background:'var(--bg)',
+                  border:'1px dashed var(--border-active)', borderRadius:'var(--radius)',
+                  color:'var(--text-dim)', cursor:'pointer', fontSize:13,
+                }}>
+                  {I.camera} Choose image or paste from clipboard
+                </button>
+              )}
+              <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display:'none' }} />
+            </div>
+          )}
+
+          <input value={title} onChange={e=>setTitle(e.target.value)} placeholder="Title (auto-generated)"
+            style={{
+              background:'var(--bg)', border:'1px solid var(--border)',
+              borderRadius:'var(--radius)', padding:'8px 12px',
+              fontSize:13, color:'var(--text)', outline:'none',
+            }}
+          />
+          <textarea value={note} onChange={e=>setNote(e.target.value)}
+            placeholder={mode==='text' ? 'Your note...' : 'Add a note...'}
+            rows={mode==='text'?4:2}
+            style={{
+              background:'var(--bg)', border:'1px solid var(--border)',
+              borderRadius:'var(--radius)', padding:'8px 12px',
+              fontSize:13, color:'var(--text)', outline:'none', resize:'vertical',
+            }}
+          />
+          <select value={collection} onChange={e=>setCollection(e.target.value)} style={{
+            background:'var(--bg)', border:'1px solid var(--border)',
+            borderRadius:'var(--radius)', padding:'8px 12px',
+            fontSize:13, color:'var(--text)', outline:'none',
+          }}>
+            <option value="">Unsorted</option>
+            {collections.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+
+          <button onClick={submit} disabled={saving} style={{
+            background: saving ? 'var(--bg-hover)' : 'var(--accent)',
+            color: saving ? 'var(--text-dim)' : 'var(--accent-text)',
+            border:'none', borderRadius:'var(--radius)',
+            padding:'10px 0', fontSize:13, fontWeight:600, cursor: saving?'wait':'pointer',
+            marginTop:4, display:'flex', alignItems:'center', justifyContent:'center', gap:6,
+          }}>
+            {saving ? <><span className="spinner" /> Saving to cloud...</> : <>{I.cloud} Save to Cloud</>}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Sidebar ─────────────────────────────────────────────────
+function Sidebar({ collections, activeCollection, setActiveCollection, onAddCollection, onDeleteCollection, allTags, activeTag, setActiveTag, isMobile, isOpen, onClose }) {
+  const [newColl, setNewColl] = useState('');
+
+  const sidebar = (
+    <div style={{
+      width: isMobile ? '100%' : 220, minWidth: isMobile?'auto':220,
+      height:'100%', background:'var(--bg-surface)',
+      borderRight: isMobile?'none':'1px solid var(--border)',
+      display:'flex', flexDirection:'column',
+      position: isMobile?'fixed':'relative',
+      top:0, left:0, zIndex: isMobile?900:1,
+      transform: isMobile&&!isOpen ? 'translateX(-100%)' : 'none',
+      transition:'transform 0.25s ease',
+    }}>
+      <div style={{
+        padding:'16px 16px 12px', borderBottom:'1px solid var(--border)',
+        display:'flex', justifyContent:'space-between', alignItems:'center',
+      }}>
+        <div>
+          <div style={{ fontFamily:'var(--font-mono)', fontWeight:600, fontSize:15, letterSpacing:'-0.02em' }}>
+            GRAB<span style={{ color:'var(--accent)' }}>REF</span>
+          </div>
+          <div style={{ fontSize:10, color:'var(--text-muted)', marginTop:2 }}>reference vault</div>
+        </div>
+        {isMobile && (
+          <button onClick={onClose} style={{ background:'none', border:'none', color:'var(--text-dim)', cursor:'pointer' }}>{I.x}</button>
+        )}
+      </div>
+
+      <div style={{ flex:1, overflow:'auto', padding:'12px 10px' }}>
+        <div style={{ fontSize:10, color:'var(--text-muted)', fontWeight:600, textTransform:'uppercase', letterSpacing:'0.08em', padding:'0 6px', marginBottom:6 }}>Collections</div>
+
+        <button onClick={()=>setActiveCollection(null)} style={{
+          width:'100%', textAlign:'left', padding:'7px 10px',
+          background: !activeCollection ? 'var(--accent-dim)' : 'transparent',
+          border:'none', borderRadius:'var(--radius)',
+          color: !activeCollection ? 'var(--accent)' : 'var(--text)',
+          cursor:'pointer', fontSize:12, fontWeight:500,
+          display:'flex', alignItems:'center', gap:7, marginBottom:2,
+        }}>{I.inbox} All References</button>
+
+        {collections.map(c => (
+          <div key={c.id} style={{ display:'flex', alignItems:'center', marginBottom:2 }}>
+            <button onClick={()=>{ setActiveCollection(c.id); if(isMobile) onClose(); }} style={{
+              flex:1, textAlign:'left', padding:'7px 10px',
+              background: activeCollection===c.id ? 'var(--accent-dim)' : 'transparent',
+              border:'none', borderRadius:'var(--radius)',
+              color: activeCollection===c.id ? 'var(--accent)' : 'var(--text)',
+              cursor:'pointer', fontSize:12, fontWeight:500,
+              display:'flex', alignItems:'center', gap:7,
+            }}>{I.folder} {c.name}</button>
+            <button onClick={()=>onDeleteCollection(c.id)} style={{
+              background:'none', border:'none', color:'var(--text-muted)',
+              cursor:'pointer', padding:'4px 6px', opacity:0.5, fontSize:10,
+            }}>{I.x}</button>
+          </div>
+        ))}
+
+        <div style={{ display:'flex', gap:4, marginTop:4, padding:'0 4px' }}>
+          <input value={newColl} onChange={e=>setNewColl(e.target.value)}
+            onKeyDown={e=>{ if (e.key==='Enter' && newColl.trim()) { onAddCollection(newColl.trim()); setNewColl(''); } }}
+            placeholder="New collection..."
+            style={{
+              flex:1, background:'var(--bg)', border:'1px solid var(--border)',
+              borderRadius:'var(--radius)', padding:'5px 8px',
+              fontSize:11, color:'var(--text)', outline:'none',
+            }}
+          />
+        </div>
+
+        <div style={{ fontSize:10, color:'var(--text-muted)', fontWeight:600, textTransform:'uppercase', letterSpacing:'0.08em', padding:'0 6px', marginTop:20, marginBottom:8 }}>
+          {I.tag} Tags
+        </div>
+        <div style={{ display:'flex', flexWrap:'wrap', gap:4, padding:'0 6px' }}>
+          {allTags.slice(0,30).map(t => (
+            <Tag key={t} label={t} active={activeTag===t} onClick={()=>setActiveTag(activeTag===t?null:t)} />
+          ))}
+          {allTags.length===0 && <span style={{ fontSize:11, color:'var(--text-muted)' }}>Tags auto-appear here</span>}
+        </div>
+      </div>
+    </div>
+  );
+
+  if (isMobile && isOpen) return (
+    <>
+      <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.5)', zIndex:899 }} />
+      {sidebar}
+    </>
+  );
+  return sidebar;
+}
+
+// ─── App ─────────────────────────────────────────────────────
+function App() {
+  const [refs, setRefs] = useState([]);
+  const [collections, setCollections] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [online, setOnline] = useState(navigator.onLine);
+  const [activeCollection, setActiveCollection] = useState(null);
+  const [activeTag, setActiveTag] = useState(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [viewMode, setViewMode] = useState('masonry');
+  const [selectedItem, setSelectedItem] = useState(null);
+  const [showAdd, setShowAdd] = useState(false);
+  const [dropActive, setDropActive] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const mainRef = useRef(null);
+  const { toasts, toast } = useToast();
+
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
+
+  // Online status
+  useEffect(() => {
+    const on = () => setOnline(true);
+    const off = () => setOnline(false);
+    window.addEventListener('online', on);
+    window.addEventListener('offline', off);
+    return () => { window.removeEventListener('online', on); window.removeEventListener('offline', off); };
+  }, []);
+
+  // Load from Supabase
+  useEffect(() => {
+    (async () => {
+      try {
+        const [r, c] = await Promise.all([sbGetAll('refs'), sbGetAll('collections')]);
+        setRefs(r);
+        setCollections(c);
+      } catch(e) {
+        toast('Failed to load data — check connection', 'error');
+        console.error(e);
+      }
+      setLoading(false);
+    })();
+  }, []);
+
+  // Realtime sync
+  useEffect(() => {
+    const channel = supabase
+      .channel('grabref-changes')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'refs' }, payload => {
+        setRefs(prev => {
+          if (prev.find(r => r.id === payload.new.id)) return prev;
+          return [payload.new, ...prev];
+        });
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'refs' }, payload => {
+        setRefs(prev => prev.map(r => r.id === payload.new.id ? payload.new : r));
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'refs' }, payload => {
+        setRefs(prev => prev.filter(r => r.id !== payload.old.id));
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'collections' }, () => {
+        sbGetAll('collections').then(c => setCollections(c)).catch(() => {});
+      })
+      .subscribe();
+    return () => supabase.removeChannel(channel);
+  }, []);
+
+  // Tags
+  const allTags = useMemo(() => {
+    const map = {};
+    refs.forEach(r => r.tags?.forEach(t => { map[t] = (map[t]||0)+1; }));
+    return Object.entries(map).sort((a,b)=>b[1]-a[1]).map(([t])=>t);
+  }, [refs]);
+
+  // Filter
+  const filteredRefs = useMemo(() => {
+    let items = refs;
+    if (activeCollection) items = items.filter(r => r.collection_id === activeCollection);
+    if (activeTag) items = items.filter(r => r.tags?.includes(activeTag));
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      items = items.filter(r =>
+        (r.title||'').toLowerCase().includes(q) ||
+        (r.note||'').toLowerCase().includes(q) ||
+        (r.source_url||'').toLowerCase().includes(q) ||
+        r.tags?.some(t=>t.includes(q))
+      );
+    }
+    return items;
+  }, [refs, activeCollection, activeTag, searchQuery]);
+
+  // CRUD
+  async function addRef(item) {
+    setRefs(prev => [item, ...prev]);
+    try {
+      await sbUpsert('refs', item);
+      toast('Saved to cloud ☁️', 'success');
+    } catch(e) {
+      toast('Save failed — check connection', 'error');
+    }
+  }
+
+  async function updateRef(item) {
+    setRefs(prev => prev.map(r => r.id===item.id ? item : r));
+    setSelectedItem(item);
+    try {
+      await sbUpsert('refs', item);
+      toast('Updated ✓', 'success');
+    } catch(e) {
+      toast('Update failed', 'error');
+    }
+  }
+
+  async function deleteRef(id) {
+    const item = refs.find(r => r.id===id);
+    setRefs(prev => prev.filter(r => r.id!==id));
+    if (selectedItem?.id===id) setSelectedItem(null);
+    try {
+      const paths = [item?.storage_path, item?.thumb_path].filter(Boolean);
+      if (paths.length) await Promise.all(paths.map(p => sbDeleteImage(p)));
+      await sbDelete('refs', id);
+      toast('Deleted', 'info');
+    } catch(e) {
+      toast('Delete failed', 'error');
+    }
+  }
+
+  async function addCollection(name) {
+    const c = { id: uid(), name, created_at: Date.now() };
+    setCollections(prev => [...prev, c]);
+    try { await sbUpsert('collections', c); } catch(e) { toast('Failed to save collection', 'error'); }
+  }
+
+  async function deleteCollection(id) {
+    setCollections(prev => prev.filter(c => c.id!==id));
+    if (activeCollection===id) setActiveCollection(null);
+    try { await sbDelete('collections', id); } catch(e) {}
+  }
+
+  // Drop handlers
+  function handleDragOver(e) { e.preventDefault(); setDropActive(true); }
+  function handleDragLeave(e) { if (!e.relatedTarget || e.relatedTarget===document.documentElement) setDropActive(false); }
+  async function handleDrop(e) {
+    e.preventDefault();
+    setDropActive(false);
+
+    if (e.dataTransfer.files?.length) {
+      for (const file of e.dataTransfer.files) {
+        if (file.type.startsWith('image/')) {
+          try {
+            const itemTitle = file.name.replace(/\.[^.]+$/,'');
+            const { full, thumb } = await processImageDual(file);
+            const baseName = buildFilename(itemTitle);
+            const fullPath = `full/${baseName}`;
+            const tPath = `thumb/${baseName}`;
+            const fullUrl = await sbUploadImage(full.blob, fullPath);
+            const thumbUrl = await sbUploadImage(thumb.blob, tPath);
+            const ref = {
+              id: uid(), type:'image',
+              title: itemTitle,
+              note:null, source_url:null,
+              thumbnail_url: thumbUrl, full_url: fullUrl,
+              storage_path: fullPath, thumb_path: tPath,
+              collection_id: activeCollection||null,
+              tags:[], created_at:Date.now(),
+            };
+            ref.tags = autoTag(ref);
+            await addRef(ref);
+          } catch(err) { toast('Upload failed', 'error'); }
+        }
+      }
+      return;
+    }
+
+    const html = e.dataTransfer.getData('text/html');
+    const url = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
+
+    if (html) {
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const imgs = doc.querySelectorAll('img');
+      if (imgs.length) {
+        for (const img of imgs) {
+          if (img.src && img.src.startsWith('http')) {
+            const ref = {
+              id:uid(), type:'image',
+              title: img.alt||'Dragged image',
+              note:null, source_url: img.src,
+              thumbnail_url: img.src, storage_path:null,
+              collection_id: activeCollection||null,
+              tags:[], created_at:Date.now(),
+            };
+            ref.tags = autoTag(ref);
+            await addRef(ref);
+          }
+        }
+        return;
+      }
+    }
+
+    if (url && url.match(/^https?:\/\//)) {
+      const ref = {
+        id:uid(), type:'link',
+        title: url.replace(/^https?:\/\/(www\.)?/,'').split('/')[0],
+        note:null, source_url: url,
+        thumbnail_url: `https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=${encodeURIComponent(url)}&size=128`,
+        storage_path:null,
+        collection_id: activeCollection||null,
+        tags:[], created_at:Date.now(),
+      };
+      ref.tags = autoTag(ref);
+      await addRef(ref);
+      return;
+    }
+
+    const text = e.dataTransfer.getData('text/plain');
+    if (text?.trim()) {
+      const ref = {
+        id:uid(), type:'text',
+        title: text.trim().slice(0,60),
+        note: text.trim(), source_url:null,
+        thumbnail_url:null, storage_path:null,
+        collection_id: activeCollection||null,
+        tags:[], created_at:Date.now(),
+      };
+      ref.tags = autoTag(ref);
+      await addRef(ref);
+    }
+  }
+
+  // Paste anywhere
+  useEffect(() => {
+    async function handlePaste(e) {
+      if (showAdd||selectedItem) return;
+      if (document.activeElement?.tagName==='INPUT'||document.activeElement?.tagName==='TEXTAREA') return;
+      const items = e.clipboardData?.items;
+      if (!items) return;
+
+      for (const item of items) {
+        if (item.type.startsWith('image/')) {
+          const file = item.getAsFile();
+          try {
+            const { full, thumb } = await processImageDual(file);
+            const baseName = buildFilename('pasted_image');
+            const fullPath = `full/${baseName}`;
+            const tPath = `thumb/${baseName}`;
+            const fullUrl = await sbUploadImage(full.blob, fullPath);
+            const thumbUrl = await sbUploadImage(thumb.blob, tPath);
+            const ref = {
+              id:uid(), type:'image', title:'Pasted image',
+              note:null, source_url:null,
+              thumbnail_url: thumbUrl, full_url: fullUrl,
+              storage_path: fullPath, thumb_path: tPath,
+              collection_id: activeCollection||null,
+              tags:[], created_at:Date.now(),
+            };
+            ref.tags = autoTag(ref);
+            await addRef(ref);
+          } catch(err) { toast('Upload failed', 'error'); }
+          e.preventDefault(); return;
+        }
+      }
+
+      const text = e.clipboardData.getData('text/plain');
+      if (text?.trim()) {
+        const isUrl = text.trim().match(/^https?:\/\//);
+        const ref = {
+          id:uid(), type: isUrl?'link':'text',
+          title: isUrl ? text.trim().replace(/^https?:\/\/(www\.)?/,'').split('/')[0] : text.trim().slice(0,60),
+          note: isUrl ? null : text.trim(),
+          source_url: isUrl ? text.trim() : null,
+          thumbnail_url: isUrl ? `https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=${encodeURIComponent(text.trim())}&size=128` : null,
+          storage_path:null,
+          collection_id: activeCollection||null,
+          tags:[], created_at:Date.now(),
+        };
+        ref.tags = autoTag(ref);
+        await addRef(ref);
+        e.preventDefault();
+      }
+    }
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, [showAdd, selectedItem, activeCollection]);
+
+  // Keyboard
+  useEffect(() => {
+    function handleKey(e) {
+      if (e.key==='n'&&(e.metaKey||e.ctrlKey)) { e.preventDefault(); setShowAdd(true); }
+      if (e.key==='Escape') { setSelectedItem(null); setShowAdd(false); }
+      if (e.key==='/'&&!showAdd&&!selectedItem) {
+        const a = document.activeElement?.tagName;
+        if (a!=='INPUT'&&a!=='TEXTAREA') { e.preventDefault(); document.getElementById('search-input')?.focus(); }
+      }
+    }
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [showAdd, selectedItem]);
+
+  // Columns
+  const [columns, setColumns] = useState(3);
+  useEffect(() => {
+    const update = () => {
+      const w = mainRef.current?.offsetWidth || window.innerWidth;
+      setColumns(w<400?2 : w<700?3 : w<1000?4 : 5);
+    };
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
+
+  const masonryColumns = useMemo(() => {
+    const cols = Array.from({ length:columns }, ()=>[]);
+    filteredRefs.forEach((item,i) => cols[i%columns].push(item));
+    return cols;
+  }, [filteredRefs, columns]);
+
+  const collectionName = activeCollection
+    ? collections.find(c=>c.id===activeCollection)?.name||'Collection'
+    : 'All References';
+
+  return (
+    <AppCtx.Provider value={{}}>
+      <div onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}
+        style={{ display:'flex', height:'100%', position:'relative' }}
+      >
+        {/* Drop overlay */}
+        {dropActive && (
+          <div style={{
+            position:'fixed', inset:0, zIndex:800,
+            background:'rgba(232,168,56,0.06)',
+            border:'3px dashed var(--accent)', borderRadius:8,
+            display:'flex', alignItems:'center', justifyContent:'center',
+            pointerEvents:'none',
+          }}>
+            <div style={{
+              background:'var(--bg-card)', padding:'24px 40px',
+              borderRadius:'var(--radius-lg)', textAlign:'center',
+              border:'1px solid var(--accent)',
+            }}>
+              <div style={{ fontSize:32, marginBottom:8 }}>+</div>
+              <div style={{ fontWeight:600, fontSize:15 }}>Drop to save to cloud</div>
+              <div style={{ fontSize:12, color:'var(--text-dim)', marginTop:4 }}>Images, links, or text</div>
+            </div>
+          </div>
+        )}
+
+        <Sidebar
+          collections={collections}
+          activeCollection={activeCollection} setActiveCollection={setActiveCollection}
+          onAddCollection={addCollection} onDeleteCollection={deleteCollection}
+          allTags={allTags} activeTag={activeTag} setActiveTag={setActiveTag}
+          isMobile={isMobile} isOpen={sidebarOpen} onClose={()=>setSidebarOpen(false)}
+        />
+
+        <div ref={mainRef} style={{ flex:1, display:'flex', flexDirection:'column', height:'100%', overflow:'hidden' }}>
+          {/* Toolbar */}
+          <div style={{
+            padding:'10px 16px', borderBottom:'1px solid var(--border)',
+            display:'flex', alignItems:'center', gap:10,
+            background:'var(--bg)', flexWrap:'wrap',
+          }}>
+            {isMobile && (
+              <button onClick={()=>setSidebarOpen(true)} style={{ background:'none', border:'none', color:'var(--text)', cursor:'pointer', padding:4 }}>
+                {I.menu}
+              </button>
+            )}
+
+            <div style={{ fontWeight:600, fontSize:14, minWidth:80 }}>{collectionName}</div>
+            <span style={{ fontSize:11, color:'var(--text-muted)', fontFamily:'var(--font-mono)' }}>{filteredRefs.length}</span>
+
+            {/* Online indicator */}
+            <div style={{
+              display:'flex', alignItems:'center', gap:4,
+              fontSize:10, color: online?'var(--success)':'var(--danger)',
+              fontFamily:'var(--font-mono)',
+            }}>
+              {online ? I.wifi : I.wifiOff}
+              {online ? 'synced' : 'offline'}
+            </div>
+
+            <div style={{ flex:1 }} />
+
+            {/* Search */}
+            <div style={{
+              display:'flex', alignItems:'center', gap:6,
+              background:'var(--bg-card)', border:'1px solid var(--border)',
+              borderRadius:'var(--radius)', padding:'5px 10px',
+              minWidth: isMobile?120:200, maxWidth:300,
+            }}>
+              {I.search}
+              <input id="search-input" value={searchQuery} onChange={e=>setSearchQuery(e.target.value)}
+                placeholder="Search... ( / )"
+                style={{ border:'none', background:'none', outline:'none', color:'var(--text)', fontSize:12, width:'100%' }}
+              />
+              {searchQuery && (
+                <button onClick={()=>setSearchQuery('')} style={{ background:'none', border:'none', color:'var(--text-muted)', cursor:'pointer', padding:0 }}>{I.x}</button>
+              )}
+            </div>
+
+            {/* View toggles */}
+            <div style={{ display:'flex', gap:2, background:'var(--bg-card)', borderRadius:'var(--radius)', padding:2, border:'1px solid var(--border)' }}>
+              {[['masonry',I.masonry],['grid',I.grid],['list',I.list]].map(([mode,icon]) => (
+                <button key={mode} onClick={()=>setViewMode(mode)} style={{
+                  background: viewMode===mode?'var(--bg-hover)':'transparent',
+                  border:'none', borderRadius:3, padding:'4px 7px',
+                  color: viewMode===mode?'var(--text)':'var(--text-muted)', cursor:'pointer',
+                }}>{icon}</button>
+              ))}
+            </div>
+
+            <button onClick={()=>setShowAdd(true)} style={{
+              background:'var(--accent)', color:'var(--accent-text)',
+              border:'none', borderRadius:'var(--radius)',
+              padding:'6px 12px', fontSize:12, fontWeight:600, cursor:'pointer',
+              display:'flex', alignItems:'center', gap:4, whiteSpace:'nowrap',
+            }}>{I.plus} Add</button>
+          </div>
+
+          {/* Filters */}
+          {(activeTag||searchQuery) && (
+            <div style={{ padding:'6px 16px', display:'flex', gap:6, alignItems:'center', borderBottom:'1px solid var(--border)' }}>
+              {activeTag && <Tag label={activeTag} active removable onRemove={()=>setActiveTag(null)} />}
+              {searchQuery && <span style={{ fontSize:11, color:'var(--text-dim)' }}>"{searchQuery}"</span>}
+            </div>
+          )}
+
+          {/* Content */}
+          <div style={{ flex:1, overflow:'auto', padding:16 }}>
+            {loading ? (
+              <div style={{ textAlign:'center', padding:60, color:'var(--text-muted)' }}>
+                <div style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:8, fontSize:14 }}>
+                  <span className="spinner" /> Loading from cloud...
+                </div>
+              </div>
+            ) : filteredRefs.length===0 ? (
+              <div style={{ textAlign:'center', padding:'60px 20px', color:'var(--text-muted)' }}>
+                <div style={{ opacity:0.3, marginBottom:16 }}>{I.inbox}</div>
+                <div style={{ fontSize:15, fontWeight:600, color:'var(--text-dim)', marginBottom:6 }}>
+                  {searchQuery ? 'No matches' : 'Drop something here'}
+                </div>
+                <div style={{ fontSize:12, maxWidth:300, margin:'0 auto', lineHeight:1.5 }}>
+                  {searchQuery
+                    ? 'Try different keywords or clear filters'
+                    : 'Drag images, paste URLs, screenshot & drop. Press ⌘N to add manually.'
+                  }
+                </div>
+              </div>
+            ) : viewMode==='masonry' ? (
+              <div style={{ display:'flex', gap:12 }}>
+                {masonryColumns.map((col,i) => (
+                  <div key={i} style={{ flex:1 }}>
+                    {col.map(item => <RefCard key={item.id} item={item} onSelect={setSelectedItem} onDelete={deleteRef} />)}
+                  </div>
+                ))}
+              </div>
+            ) : viewMode==='grid' ? (
+              <div style={{
+                display:'grid',
+                gridTemplateColumns:`repeat(auto-fill, minmax(${isMobile?'140px':'200px'}, 1fr))`,
+                gap:12,
+              }}>
+                {filteredRefs.map(item => <RefCard key={item.id} item={item} onSelect={setSelectedItem} onDelete={deleteRef} compact />)}
+              </div>
+            ) : (
+              <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+                {filteredRefs.map(item => (
+                  <div key={item.id} className="animate-in"
+                    onClick={()=>setSelectedItem(item)}
+                    style={{
+                      display:'flex', alignItems:'center', gap:12,
+                      padding:'8px 12px',
+                      background:'var(--bg-card)', border:'1px solid var(--border)',
+                      borderRadius:'var(--radius)', cursor:'pointer',
+                    }}
+                  >
+                    {item.thumbnail_url && (
+                      <img src={item.thumbnail_url} alt="" style={{ width:40, height:40, objectFit:'cover', borderRadius:3, flexShrink:0, background:'#111' }} />
+                    )}
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:13, fontWeight:500, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                        {item.title||'Untitled'}
+                      </div>
+                      <div style={{ fontSize:11, color:'var(--text-muted)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                        {item.source_url||item.note||''}
+                      </div>
+                    </div>
+                    <div style={{ display:'flex', gap:3, flexShrink:0 }}>
+                      {item.tags?.slice(0,2).map(t=><Tag key={t} label={t} />)}
+                    </div>
+                    <span style={{ fontSize:10, color:'var(--text-muted)', flexShrink:0 }}>
+                      {new Date(item.created_at).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {showAdd && <AddModal onClose={()=>setShowAdd(false)} onAdd={addRef} collections={collections} />}
+        {selectedItem && (
+          <DetailModal item={selectedItem} onClose={()=>setSelectedItem(null)} onUpdate={updateRef} onDelete={deleteRef} />
+        )}
+
+        <Toast toasts={toasts} />
+      </div>
+    </AppCtx.Provider>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
