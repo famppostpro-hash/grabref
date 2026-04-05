@@ -553,6 +553,144 @@
     ::-webkit-scrollbar { width: 4px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+    /* ── Help Modal ── */
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.7);
+      z-index: 200;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .modal-backdrop.show { display: flex; }
+
+    .modal {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      width: 100%;
+      max-width: 480px;
+      max-height: 90vh;
+      overflow-y: auto;
+      box-shadow: 0 20px 60px rgba(0,0,0,.5);
+    }
+
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+    }
+    .modal-header h2 { font-size: 16px; font-weight: 700; }
+
+    .modal-close {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 20px;
+      cursor: pointer;
+      line-height: 1;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+    .modal-close:hover { background: var(--surface2); color: var(--text); }
+
+    .modal-body { padding: 20px; }
+
+    .step-list { display: flex; flex-direction: column; gap: 16px; }
+
+    .step {
+      display: flex;
+      gap: 14px;
+      align-items: flex-start;
+    }
+
+    .step-num {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .step-content { flex: 1; }
+    .step-content h4 { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+    .step-content p { font-size: 13px; color: var(--text-muted); line-height: 1.6; }
+
+    .code-block {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 14px;
+      font-family: 'Menlo', 'Monaco', monospace;
+      font-size: 12px;
+      color: var(--accent);
+      margin-top: 8px;
+      word-break: break-all;
+      position: relative;
+    }
+
+    .copy-btn {
+      position: absolute;
+      top: 6px; right: 8px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      color: var(--text-muted);
+      font-size: 11px;
+      padding: 2px 7px;
+      cursor: pointer;
+    }
+    .copy-btn:hover { color: var(--text); }
+
+    .info-box {
+      background: #1a2240;
+      border: 1px solid #2e3d6e;
+      border-radius: var(--radius-sm);
+      padding: 10px 14px;
+      font-size: 12px;
+      color: #a0b4e8;
+      line-height: 1.6;
+      margin-top: 8px;
+    }
+
+    .modal-footer {
+      padding: 14px 20px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: flex-end;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius-sm);
+      padding: 9px 20px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-primary:hover { opacity: .85; }
+
+    .tunnel-url-display {
+      background: var(--bg);
+      border: 1px solid var(--success);
+      border-radius: var(--radius-sm);
+      padding: 10px 14px;
+      font-size: 12px;
+      color: var(--success);
+      margin-top: 8px;
+      font-family: 'Menlo', 'Monaco', monospace;
+      word-break: break-all;
+    }
   </style>
 </head>
 <body>
@@ -567,6 +705,7 @@
     </div>
     <div class="header-actions">
       <!-- Mobile sidebar toggle -->
+      <button class="btn btn-ghost btn-icon" onclick="showHelp()" title="วิธีใช้">ℹ️</button>
       <button class="btn btn-ghost btn-icon" onclick="toggleSidebar()" title="Settings">⚙️</button>
       <button class="btn btn-ghost btn-icon" onclick="testConnection()" title="Test">🔌</button>
       <button class="btn btn-danger btn-icon" onclick="clearChat()" title="Clear">🗑</button>
@@ -673,6 +812,88 @@
         </div>
       </div>
       <input type="file" id="fileInput" accept="image/*" multiple onchange="handleImageUpload(event)" />
+    </div>
+  </div>
+</div>
+
+<!-- Help Modal -->
+<div class="modal-backdrop" id="helpModal" onclick="closeHelpOnBackdrop(event)">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>🚀 วิธีใช้ Gemma4 Chat</h2>
+      <button class="modal-close" onclick="closeHelp()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="step-list">
+
+        <div class="step">
+          <div class="step-num">1</div>
+          <div class="step-content">
+            <h4>เปิด LM Studio และโหลดโมเดล</h4>
+            <p>เปิด <strong>LM Studio</strong> บน Mac แล้วโหลดโมเดลที่ต้องการใช้ (เช่น gemma-4-27b-it)</p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-num">2</div>
+          <div class="step-content">
+            <h4>เปิด Local Server ใน LM Studio</h4>
+            <p>ไปที่แท็บ <strong>Developer → Local Server</strong> แล้วกด <strong>Start Server</strong><br/>ต้องเปิด <strong>Serve on Local Network</strong> และ <strong>Enable CORS</strong> ด้วย</p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-num">3</div>
+          <div class="step-content">
+            <h4>รัน Cloudflare Tunnel (ทำทุกครั้งที่จะใช้)</h4>
+            <p>เปิด <strong>Terminal</strong> บน Mac แล้วรันคำสั่งนี้:</p>
+            <div class="code-block">
+              cloudflared tunnel --url http://localhost:1234
+              <button class="copy-btn" onclick="copyText('cloudflared tunnel --url http://localhost:1234')">copy</button>
+            </div>
+            <p style="margin-top:8px;">รอจนเห็น URL รูปแบบ:</p>
+            <div class="tunnel-url-display">https://xxxx-xxxx-xxxx.trycloudflare.com</div>
+            <div class="info-box">
+              ⚠️ URL จะเปลี่ยนทุกครั้งที่รัน Terminal ใหม่<br/>
+              ต้องอัปเดต Server URL ในหน้าเว็บด้วยทุกครั้ง
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-num">4</div>
+          <div class="step-content">
+            <h4>ติดตั้ง cloudflared (ถ้ายังไม่มี)</h4>
+            <p>ถ้ารันแล้วเจอ <em>command not found</em> ให้ติดตั้งก่อน:</p>
+            <div class="code-block">
+              brew install cloudflared
+              <button class="copy-btn" onclick="copyText('brew install cloudflared')">copy</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-num">5</div>
+          <div class="step-content">
+            <h4>ใส่ Server URL และ API Key</h4>
+            <p>คัดลอก URL จาก Terminal มาวางในช่อง <strong>Server</strong><br/>
+            ใส่ API Key จาก LM Studio → <strong>Developer → API Tokens</strong> (สร้างใหม่ถ้ายังไม่มี) แล้วกด 🔌 เพื่อเทสต์การเชื่อมต่อ</p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-num">6</div>
+          <div class="step-content">
+            <h4>เริ่มแชทได้เลย! 🎉</h4>
+            <p>กด <strong>⟳ Models</strong> เพื่อโหลดรายการโมเดล แล้วเลือกโมเดลที่ต้องการ<br/>
+            สามารถส่งรูปภาพได้โดยกดปุ่ม 🖼 หรือวางรูปในช่องพิมพ์</p>
+          </div>
+        </div>
+
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-primary" onclick="closeHelp()">เข้าใจแล้ว ✓</button>
     </div>
   </div>
 </div>
@@ -1016,6 +1237,23 @@
         <p>ใส่ Server URL และ API Key<br/>แล้วกด 🔌 Test เพื่อเชื่อมต่อ</p>
       </div>`;
     toast('ล้างการสนทนาแล้ว', 'info');
+  }
+
+  // ── Help Modal ──
+  function showHelp() {
+    $('helpModal').classList.add('show');
+  }
+
+  function closeHelp() {
+    $('helpModal').classList.remove('show');
+  }
+
+  function closeHelpOnBackdrop(e) {
+    if (e.target === $('helpModal')) closeHelp();
+  }
+
+  function copyText(text) {
+    navigator.clipboard.writeText(text).then(() => toast('คัดลอกแล้ว ✓', 'success', 2000));
   }
 
   // ── Init ──
